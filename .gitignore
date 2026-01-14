@@ -1,0 +1,93 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+venv/
+venv_linux/
+env/
+ENV/
+.venv
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Data Files (LARGE - don't commit to GitHub!)
+data/raw/*.fits
+data/raw/*.FITS
+data/processed/
+*.parquet
+*.hdf5
+*.h5
+
+# Results (keep small CSVs, ignore large outputs)
+download_results.csv
+feature_results.csv
+*.log
+
+# Checkpoints (optional - commit if you want resume state in repo)
+checkpoints/*.json
+checkpoints/*.tmp
+
+# Lightkurve Cache
+.lightkurve-cache/
+~/.lightkurve-cache/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+.~lock.*
+
+# Testing artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Environment variables (NEVER commit secrets!)
+.env
+.env.local
+credentials.json
+config.local.py
+
+# Compiled files
+*.pyc
+*.pyo
+*.pyd
+
+# Databases (if you add SQLite later)
+*.db
+*.sqlite
+*.sqlite3
