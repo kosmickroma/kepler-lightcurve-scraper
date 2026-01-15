@@ -26,6 +26,10 @@ import pandas as pd
 
 from . import DownloadError
 
+# CRITICAL: Disable memory-mapped I/O for WSL2 compatibility
+# Prevents "Bus error" crashes from corrupted FITS files in cache
+import astropy.io.fits as fitsio
+fitsio.Conf.use_memmap = False
 
 logger = logging.getLogger(__name__)
 
@@ -239,8 +243,13 @@ class AsyncDownloader:
 
             for i, res in enumerate(search):
                 try:
-                    # Download single quarter
-                    lc_quarter = res.download()
+                    # Download single quarter with PDCSAP flux and quality filtering
+                    # PDCSAP = Pre-search Data Conditioning (cleaned, systematics removed)
+                    # quality_bitmask='default' includes Rolling Band filtering (bit 17)
+                    lc_quarter = res.download(
+                        flux_column='pdcsap_flux',
+                        quality_bitmask='default'
+                    )
                     quarter_lcs.append(lc_quarter)
                     logger.debug(f"{target_id}: Downloaded quarter {i+1}/{len(search)}")
 
@@ -267,11 +276,15 @@ class AsyncDownloader:
             # Cache corruption handling
             if "truncated" in str(e).lower() or "corrupt" in str(e).lower():
                 logger.warning(f"Corrupted cache detected for {target_id}, retrying...")
-                # Retry with cache disabled
+                # Retry with cache disabled (but keep PDCSAP and quality filtering)
                 quarter_lcs = []
                 for res in search:
                     try:
-                        lc_quarter = res.download(download_dir=None)
+                        lc_quarter = res.download(
+                            download_dir=None,
+                            flux_column='pdcsap_flux',
+                            quality_bitmask='default'
+                        )
                         quarter_lcs.append(lc_quarter)
                     except:
                         continue
@@ -318,8 +331,9 @@ class AsyncDownloader:
         Returns:
             List of DownloadResults
         """
-        self.start_time = time.time()
-        self.results = []
+        # Use local variables to avoid race conditions in parallel batches
+        start_time = time.time()
+        results = []
 
         logger.info(f"Starting batch download: {len(target_ids)} targets")
 
@@ -332,24 +346,66 @@ class AsyncDownloader:
         # Process with progress tracking
         for i, task in enumerate(asyncio.as_completed(tasks), 1):
             result = await task
-            self.results.append(result)
+            results.append(result)
 
-            # Calculate metrics
-            metrics = self._calculate_metrics(len(target_ids))
+            # Calculate metrics (using local variables)
+            elapsed = time.time() - start_time
+            completed = len(results)
+            successful = sum(1 for r in results if r.success)
+            failed = completed - successful
+            tps = completed / elapsed if elapsed > 0 else 0
+            success_rate = successful / completed if completed > 0 else 0
+            remaining = len(target_ids) - completed
+            eta = remaining / tps if tps > 0 else None
+
+            metrics = DownloadMetrics(
+                total_targets=len(target_ids),
+                completed=completed,
+                successful=successful,
+                failed=failed,
+                elapsed_time=elapsed,
+                targets_per_second=tps,
+                success_rate=success_rate,
+                estimated_time_remaining=eta,
+            )
 
             # Progress callback
             if progress_callback:
                 progress_callback(metrics)
 
-            # Log every 10 targets
-            if i % 10 == 0:
+            # Heartbeat every 50 targets (prevents "script hung" concerns)
+            if i % 50 == 0 and i > 0:
+                percent_complete = (i / total) * 100
+                logger.info("")
+                logger.info("=" * 80)
+                logger.info(f"[PROGRESS] {i}/{total} targets processed ({percent_complete:.1f}%)")
+                logger.info(f"           Success rate: {metrics.success_rate*100:.1f}%")
+                logger.info(f"           Speed: {metrics.targets_per_second:.2f} tgt/s")
+                if metrics.estimated_time_remaining:
+                    eta_hours = metrics.estimated_time_remaining / 3600
+                    logger.info(f"           Est. time remaining: {eta_hours:.1f}h")
+                logger.info("=" * 80)
+                logger.info("")
+
+            # Log every 10 targets (detailed)
+            elif i % 10 == 0:
                 logger.info(str(metrics))
 
         # Final metrics
-        final_metrics = self._calculate_metrics(len(target_ids))
+        elapsed = time.time() - start_time
+        successful = sum(1 for r in results if r.success)
+        final_metrics = DownloadMetrics(
+            total_targets=len(target_ids),
+            completed=len(results),
+            successful=successful,
+            failed=len(results) - successful,
+            elapsed_time=elapsed,
+            targets_per_second=len(results) / elapsed if elapsed > 0 else 0,
+            success_rate=successful / len(results) if results else 0,
+        )
         logger.info(f"Batch complete: {final_metrics}")
 
-        return self.results
+        return results
 
     def _calculate_metrics(self, total: int) -> DownloadMetrics:
         """Calculate current download metrics."""

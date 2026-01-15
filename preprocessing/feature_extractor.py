@@ -18,6 +18,7 @@ from preprocessing.features import (
     extract_residual_features,
     extract_shape_features,
     extract_transit_features,
+    extract_centroid_features,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,17 @@ class FeatureExtractor:
 
     def __init__(self):
         """Initialize feature extractor."""
-        self.feature_count = 47
+        # Feature count: stat(12) + temp(10) + freq(11) + resid(8) + shape(8) + transit(10) + centroid(4) = 63
+        # Note: Scientific validation features added:
+        #   Transit (3 new):
+        #     - transit_implied_r_planet_rjup (physical plausibility)
+        #     - transit_physically_plausible (R_p < 2 R_Jupiter check)
+        #     - transit_odd_even_consistent (eclipsing binary detection)
+        #   Frequency (1 new):
+        #     - freq_is_instrumental_alias (12h/24h alias detection)
+        #   Centroid (4 total):
+        #     - centroid_jitter_mean, centroid_jitter_std, centroid_jitter_max, centroid_rms_motion
+        self.feature_count = 63
         self.domain_extractors = {
             'statistical': extract_statistical_features,
             'temporal': extract_temporal_features,
@@ -48,6 +59,7 @@ class FeatureExtractor:
             'residual': extract_residual_features,
             'shape': extract_shape_features,
             'transit': extract_transit_features,
+            'centroid': extract_centroid_features,
         }
 
     def load_light_curve_from_fits(
@@ -100,7 +112,7 @@ class FeatureExtractor:
         mission: str = 'kepler',
     ) -> Tuple[Dict[str, any], Dict[str, bool]]:
         """
-        Extract all 47 features from FITS file.
+        Extract all 58 features from FITS file.
 
         Args:
             fits_path: Path to FITS file
@@ -109,32 +121,43 @@ class FeatureExtractor:
         Returns:
             Tuple of (features dict, validity dict)
 
-        Features dict contains 47 features (or None if invalid)
-        Validity dict contains 47 boolean flags
+        Features dict contains 58 features (or None if invalid)
+        Validity dict contains 58 boolean flags
         """
-        # Load light curve
+        # Load full light curve object (needed for centroid features)
+        try:
+            lc = lk.read(str(fits_path))
+        except Exception as e:
+            logger.error(f"Failed to load {fits_path}: {e}")
+            return self._get_null_features()
+
+        # Extract flux and time arrays
         flux, time, metadata = self.load_light_curve_from_fits(fits_path)
 
         if flux is None or time is None:
             # Return all NULL features
             return self._get_null_features()
 
-        # Extract features from all domains
-        return self.extract_features(flux, time, mission)
+        # Extract features from all domains (pass lc object for centroid features)
+        return self.extract_features(flux, time, mission, lc=lc)
 
     def extract_features(
         self,
         flux: np.ndarray,
         time: np.ndarray,
         mission: str = 'kepler',
+        lc=None,
+        st_rad: float = None,
     ) -> Tuple[Dict[str, any], Dict[str, bool]]:
         """
-        Extract all 47 features from flux and time arrays.
+        Extract all 60 features from flux and time arrays.
 
         Args:
             flux: Normalized flux array
             time: Time array (BJD, days)
             mission: Mission name
+            lc: Lightkurve object (optional, needed for centroid features)
+            st_rad: Stellar radius in solar radii (optional, for transit physical validation)
 
         Returns:
             Tuple of (features dict, validity dict)
@@ -145,9 +168,30 @@ class FeatureExtractor:
         # Extract from each domain
         for domain_name, extractor_func in self.domain_extractors.items():
             try:
+                # Centroid extractor needs the light curve object
+                if domain_name == 'centroid':
+                    if lc is not None:
+                        features, validity = extractor_func(lc)
+                    else:
+                        # No lc object, return NULL features
+                        features = {
+                            'centroid_jitter_mean': None,
+                            'centroid_jitter_std': None,
+                            'centroid_jitter_max': None,
+                            'centroid_rms_motion': None,
+                        }
+                        validity = {
+                            'centroid_jitter_mean': False,
+                            'centroid_jitter_std': False,
+                            'centroid_jitter_max': False,
+                            'centroid_rms_motion': False,
+                        }
                 # Some extractors need mission parameter for normalization
-                if domain_name in ['temporal', 'frequency']:
+                elif domain_name in ['temporal', 'frequency']:
                     features, validity = extractor_func(flux, time, mission)
+                # Transit extractor can use stellar radius for physical validation
+                elif domain_name == 'transit':
+                    features, validity = extractor_func(flux, time, st_rad=st_rad)
                 else:
                     features, validity = extractor_func(flux, time)
 
@@ -168,7 +212,7 @@ class FeatureExtractor:
                 all_features.update(features)
                 all_validity.update(validity)
 
-        # Verify we have all 47 features
+        # Verify we have all 58 features
         if len(all_features) != self.feature_count:
             logger.warning(
                 f"Expected {self.feature_count} features, got {len(all_features)}"
@@ -178,7 +222,7 @@ class FeatureExtractor:
 
     def _get_null_features(self) -> Tuple[Dict[str, any], Dict[str, bool]]:
         """
-        Get dict of all 47 features set to None with validity False.
+        Get dict of all 58 features set to None with validity False.
 
         Returns:
             Tuple of (features dict, validity dict)
@@ -218,7 +262,8 @@ class FeatureExtractor:
                 'freq_dominant_period', 'freq_dominant_power', 'freq_period_snr',
                 'freq_n_significant_peaks', 'freq_spectral_entropy',
                 'freq_low_freq_power', 'freq_high_freq_power', 'freq_power_ratio',
-                'freq_harmonic_count', 'freq_quasi_periodic_score'
+                'freq_harmonic_count', 'freq_quasi_periodic_score',
+                'freq_is_instrumental_alias'
             ],
             'residual': [
                 'resid_after_detrend_std', 'resid_after_detrend_autocorr',
@@ -234,7 +279,9 @@ class FeatureExtractor:
             'transit': [
                 'transit_bls_power', 'transit_bls_period', 'transit_bls_depth',
                 'transit_bls_duration', 'transit_n_detected',
-                'transit_depth_consistency', 'transit_timing_consistency'
+                'transit_depth_consistency', 'transit_timing_consistency',
+                'transit_implied_r_planet_rjup', 'transit_physically_plausible',
+                'transit_odd_even_consistent'
             ],
         }
 
