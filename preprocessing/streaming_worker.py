@@ -4,7 +4,7 @@ Streaming Pipeline Worker
 Each worker performs the complete pipeline:
 Download → Extract → Upload → Delete → Checkpoint
 
-This is the REAL system - no shortcuts, all 47 features.
+This is the REAL system - no shortcuts, all 55 features.
 """
 
 import asyncio
@@ -38,13 +38,24 @@ def extract_features_standalone(fits_path_str: str, mission: str) -> tuple:
     """
     try:
         from pathlib import Path
+        import os
+        import astropy.io.fits as fitsio
+        fitsio.Conf.use_memmap = False  # Disable mmap for WSL2 compatibility
         from preprocessing.feature_extractor import FeatureExtractor
+        import logging
+
+        logger = logging.getLogger(__name__)
 
         extractor = FeatureExtractor()
         features, validity = extractor.extract_features_from_fits(
             Path(fits_path_str),
             mission=mission
         )
+
+        # DEBUG: Log what we extracted
+        if features:
+            logger.info(f"[WORKER PID={os.getpid()}] Extracted from {Path(fits_path_str).name}: stat_mean={features.get('stat_mean'):.10f}, n_points={features.get('temp_n_points')}")
+
         return features, validity
     except Exception as e:
         import logging
@@ -74,7 +85,7 @@ class StreamingWorker:
 
     Each target goes through:
     1. Download FITS file (async, ~17s)
-    2. Extract 47 features (CPU-bound, ~32s)
+    2. Extract 55 features (CPU-bound, ~32s)
     3. Upload to database (async, ~0.1s)
     4. Delete FITS file (save disk space)
     5. Return metrics
@@ -122,7 +133,13 @@ class StreamingWorker:
         # Cap CPU-bound workers lower than I/O workers (memory safety)
         # Feature extraction is memory-intensive, limit parallel processes
         cpu_workers = min(max_workers, 2)  # Conservative: max 2 CPU processes
-        self.process_pool = ProcessPoolExecutor(max_workers=cpu_workers)
+        # CRITICAL: max_tasks_per_child=1 prevents worker reuse and caching bugs
+        # Without this, lightkurve caches FITS data at process level causing
+        # identical feature values for different targets
+        self.process_pool = ProcessPoolExecutor(
+            max_workers=cpu_workers,
+            max_tasks_per_child=1  # Fresh process for each extraction
+        )
 
         logger.info(
             f"StreamingWorker initialized: {max_workers} I/O workers, "
@@ -133,6 +150,7 @@ class StreamingWorker:
         self.targets_processed = 0
         self.targets_succeeded = 0
         self.targets_failed = 0
+        self.upload_count = 0  # Track uploads for batch sleep
 
     async def process_target(
         self,
@@ -181,7 +199,7 @@ class StreamingWorker:
                     total_time=time.time() - start_time,
                     n_points=0,
                     n_features_valid=0,
-                    n_features_total=47,
+                    n_features_total=55,
                     error=f"Download failed: {download_result.error}",
                 )
 
@@ -194,10 +212,15 @@ class StreamingWorker:
             # Run extraction in process pool to avoid GIL
             # Use standalone function (not method) for Windows pickling
             loop = asyncio.get_event_loop()
+
+            # DEBUG: Log what we're passing to executor
+            fits_path_str = str(fits_path)
+            logger.info(f"[PASS to executor] {target_id}: passing path={fits_path_str}")
+
             features, validity = await loop.run_in_executor(
                 self.process_pool,
                 extract_features_standalone,
-                str(fits_path),  # Pass as string (pickleable)
+                fits_path_str,  # Pass as string (pickleable)
                 mission,
             )
 
@@ -213,7 +236,7 @@ class StreamingWorker:
                     total_time=time.time() - start_time,
                     n_points=download_result.n_points,
                     n_features_valid=0,
-                    n_features_total=47,
+                    n_features_total=55,
                     error="Feature extraction failed",
                     filepath_deleted=False,
                 )
@@ -264,7 +287,7 @@ class StreamingWorker:
                 total_time=total_time,
                 n_points=download_result.n_points,
                 n_features_valid=n_valid,
-                n_features_total=47,
+                n_features_total=55,
                 error=None,
                 filepath_deleted=filepath_deleted,
             )
@@ -283,7 +306,7 @@ class StreamingWorker:
                 total_time=time.time() - start_time,
                 n_points=0,
                 n_features_valid=0,
-                n_features_total=47,
+                n_features_total=55,
                 error=str(e),
             )
 
@@ -316,6 +339,9 @@ class StreamingWorker:
                 duration_days=metadata.get('duration_days', 0.0),
             )
 
+            # DEBUG: Log what we're about to upload
+            logger.info(f"[UPLOAD] {target_id}: stat_mean={features.get('stat_mean'):.10f}, n_points={features.get('temp_n_points')}")
+
             # Then insert features
             await self.database_client.insert_features(
                 target_id=target_id,
@@ -325,6 +351,13 @@ class StreamingWorker:
             )
 
             logger.debug(f"[{target_id}] Uploaded to database")
+
+            # Batch sleep strategy: prevent Supabase throttling
+            # Every 50 uploads, sleep for 1 second to give DB time to breathe
+            self.upload_count += 1
+            if self.upload_count % 50 == 0:
+                logger.info(f"[BATCH SLEEP] {self.upload_count} uploads complete, sleeping 1s to prevent DB throttling...")
+                await asyncio.sleep(1)
 
         except Exception as e:
             logger.error(f"[{target_id}] Database upload failed: {e}")
@@ -369,7 +402,7 @@ class StreamingWorker:
                         total_time=0.0,
                         n_points=0,
                         n_features_valid=0,
-                        n_features_total=47,
+                        n_features_total=55,
                         error=str(result),
                     )
                 )

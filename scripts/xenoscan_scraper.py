@@ -112,8 +112,13 @@ class XenoscanScraper:
 
     def progress_callback(self, metrics: DownloadMetrics) -> None:
         """Handle progress updates."""
-        # Print beautiful progress line
-        print(f"\r{metrics}", end='', flush=True)
+        # Print beautiful progress line (handle WSL stdout issues)
+        try:
+            print(f"\r{metrics}", end='', flush=True)
+        except (ValueError, OSError):
+            # stdout closed or unavailable (common in WSL) - use logger instead
+            if metrics.completed % 10 == 0:  # Log every 10 targets
+                logger.info(str(metrics))
 
         # Check rate limiter
         if metrics.completed % 100 == 0:
@@ -180,26 +185,39 @@ class XenoscanScraper:
             # Save checkpoint
             self.save_checkpoint(target_list, i + len(chunk))
 
-            print()  # New line after progress
+            try:
+                print()  # New line after progress
+            except (ValueError, OSError):
+                pass
             logger.info(
                 f"✅ Chunk complete: {len([r for r in results if r.success])}/{len(chunk)} successful"
             )
 
         # Final summary
-        print(f"\n{'='*80}")
-        print("🎉 DOWNLOAD COMPLETE!")
-        print(f"{'='*80}")
-
         final_metrics = self.downloader._calculate_metrics(len(target_list))
-        print(f"\n{final_metrics}\n")
 
         # Save results
         results_path = self.output_dir.parent / "download_results.csv"
         df = self.downloader.save_results(results_path)
 
-        print(f"Results saved: {results_path}")
-        print(f"Total downloaded: {len(self.downloaded_targets)}")
-        print(f"Success rate: {final_metrics.success_rate*100:.2f}%")
+        # Print summary (handle WSL stdout issues)
+        try:
+            print(f"\n{'='*80}")
+            print("🎉 DOWNLOAD COMPLETE!")
+            print(f"{'='*80}")
+            print(f"\n{final_metrics}\n")
+            print(f"Results saved: {results_path}")
+            print(f"Total downloaded: {len(self.downloaded_targets)}")
+            print(f"Success rate: {final_metrics.success_rate*100:.2f}%")
+        except (ValueError, OSError):
+            # Fallback to logging
+            logger.info("="*80)
+            logger.info("🎉 DOWNLOAD COMPLETE!")
+            logger.info("="*80)
+            logger.info(str(final_metrics))
+            logger.info(f"Results saved: {results_path}")
+            logger.info(f"Total downloaded: {len(self.downloaded_targets)}")
+            logger.info(f"Success rate: {final_metrics.success_rate*100:.2f}%")
 
 
 def get_kepler_targets(limit: int) -> list:
@@ -314,10 +332,16 @@ async def main():
         )
 
     except KeyboardInterrupt:
-        print("\n\n⚠️  Interrupted by user")
+        try:
+            print("\n\n⚠️  Interrupted by user")
+        except (ValueError, OSError):
+            pass
         logger.info("Saving checkpoint before exit...")
         scraper.save_checkpoint(target_list, len(scraper.downloaded_targets))
-        print("✅ Checkpoint saved. Run with --resume to continue.")
+        try:
+            print("✅ Checkpoint saved. Run with --resume to continue.")
+        except (ValueError, OSError):
+            logger.info("Checkpoint saved. Run with --resume to continue.")
 
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
@@ -326,7 +350,11 @@ async def main():
     finally:
         end_time = datetime.now()
         elapsed = (end_time - start_time).total_seconds()
-        print(f"\nTotal runtime: {elapsed/60:.1f} minutes")
+        try:
+            print(f"\nTotal runtime: {elapsed/60:.1f} minutes")
+        except (ValueError, OSError):
+            # stdout closed - log instead
+            logger.info(f"Total runtime: {elapsed/60:.1f} minutes")
 
 
 if __name__ == "__main__":

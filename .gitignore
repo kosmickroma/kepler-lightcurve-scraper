@@ -41,7 +41,11 @@ ENV/
 # Data Files (LARGE - don't commit to GitHub!)
 data/raw/*.fits
 data/raw/*.FITS
+data/**/*.fits
+data/**/*.FITS
 data/processed/
+data/validation_*/
+data/test_*/
 *.parquet
 *.hdf5
 *.h5
@@ -50,6 +54,10 @@ data/processed/
 download_results.csv
 feature_results.csv
 *.log
+
+# Large data files (users will regenerate these)
+data/targets_all_kepler.txt
+data/download_results.csv
 
 # Checkpoints (optional - commit if you want resume state in repo)
 checkpoints/*.json

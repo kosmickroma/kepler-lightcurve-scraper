@@ -10,6 +10,7 @@ from preprocessing.features.frequency import extract_frequency_features
 from preprocessing.features.residual import extract_residual_features
 from preprocessing.features.shape import extract_shape_features
 from preprocessing.features.transit import extract_transit_features
+from preprocessing.features.centroid import extract_centroid_features
 
 __all__ = [
     'extract_statistical_features',
@@ -18,4 +19,5 @@ __all__ = [
     'extract_residual_features',
     'extract_shape_features',
     'extract_transit_features',
+    'extract_centroid_features',
 ]

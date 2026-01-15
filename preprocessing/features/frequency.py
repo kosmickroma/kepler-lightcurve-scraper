@@ -137,14 +137,18 @@ def extract_frequency_features(
     cadence_median = np.median(np.diff(time)) if len(time) > 1 else 0.02
     nyquist_freq = get_nyquist_frequency(mission, cadence_median)
 
+    # All feature keys (10 original + 1 scientific validation)
+    all_freq_features = [
+        'freq_dominant_period', 'freq_dominant_power', 'freq_period_snr',
+        'freq_n_significant_peaks', 'freq_spectral_entropy',
+        'freq_low_freq_power', 'freq_high_freq_power', 'freq_power_ratio',
+        'freq_harmonic_count', 'freq_quasi_periodic_score',
+        'freq_is_instrumental_alias'  # Scientific validation feature
+    ]
+
     # Check minimum requirements
     if n_points < 200 or duration < 10:
-        for key in [
-            'freq_dominant_period', 'freq_dominant_power', 'freq_period_snr',
-            'freq_n_significant_peaks', 'freq_spectral_entropy',
-            'freq_low_freq_power', 'freq_high_freq_power', 'freq_power_ratio',
-            'freq_harmonic_count', 'freq_quasi_periodic_score'
-        ]:
+        for key in all_freq_features:
             features[key] = None
             validity[key] = False
         return features, validity
@@ -258,14 +262,64 @@ def extract_frequency_features(
         features['freq_quasi_periodic_score'] = float(np.clip(quasi_score, 0, 1))
         validity['freq_quasi_periodic_score'] = True
 
+        # SCIENTIFIC VALIDATION: Instrumental alias detection
+        # Flag periods that are 12h, 24h, or exact multiples/fractions of these
+        # as likely instrumental artifacts (reaction wheel frequencies, orbital effects)
+        dominant_period_hours = features['freq_dominant_period'] * 24.0  # Convert days to hours
+
+        # Known instrumental periods (hours)
+        instrumental_periods = [
+            12.0,   # Half-day alias
+            24.0,   # Full-day alias
+            6.0,    # Quarter-day
+            8.0,    # Third-day
+            4.0,    # Kepler reaction wheel ~4 hours
+            48.0,   # Two-day
+        ]
+
+        # Also check the Kepler long cadence period (~29.4 minutes)
+        kepler_cadence_hours = 29.4 / 60.0  # 0.49 hours
+
+        is_alias = False
+        alias_type = None
+        period_tolerance = 0.05  # 5% tolerance
+
+        for inst_period in instrumental_periods:
+            # Check if period matches instrumental period
+            if abs(dominant_period_hours - inst_period) / inst_period < period_tolerance:
+                is_alias = True
+                alias_type = f'{inst_period}hr'
+                break
+            # Also check if it's a harmonic (2x, 3x, 4x) of instrumental period
+            for harmonic in [2, 3, 4]:
+                if abs(dominant_period_hours - inst_period * harmonic) / (inst_period * harmonic) < period_tolerance:
+                    is_alias = True
+                    alias_type = f'{inst_period}hr_x{harmonic}'
+                    break
+            if is_alias:
+                break
+
+        # Check if very close to cadence period or its multiples
+        if not is_alias:
+            for n in [1, 2, 3, 4, 5]:
+                if abs(dominant_period_hours - kepler_cadence_hours * n) / (kepler_cadence_hours * n) < period_tolerance:
+                    is_alias = True
+                    alias_type = f'cadence_x{n}'
+                    break
+
+        features['freq_is_instrumental_alias'] = 1.0 if is_alias else 0.0
+        validity['freq_is_instrumental_alias'] = True
+
     except Exception:
         # If periodogram fails, mark all as invalid
-        for key in [
+        all_freq_features = [
             'freq_dominant_period', 'freq_dominant_power', 'freq_period_snr',
             'freq_n_significant_peaks', 'freq_spectral_entropy',
             'freq_low_freq_power', 'freq_high_freq_power', 'freq_power_ratio',
-            'freq_harmonic_count', 'freq_quasi_periodic_score'
-        ]:
+            'freq_harmonic_count', 'freq_quasi_periodic_score',
+            'freq_is_instrumental_alias'
+        ]
+        for key in all_freq_features:
             features[key] = None
             validity[key] = False
 

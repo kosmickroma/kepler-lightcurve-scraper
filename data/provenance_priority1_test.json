@@ -1,0 +1,56 @@
+{
+  "timestamp": "2026-01-15T18:53:55.579010",
+  "run_type": "priority1_test",
+  "n_targets": 1,
+  "library_versions": {
+    "lightkurve": "2.5.1",
+    "numpy": "2.3.5",
+    "scipy": "1.17.0",
+    "pandas": "2.3.3",
+    "astropy": "7.2.0",
+    "scikit-learn": "1.8.0"
+  },
+  "pipeline_settings": {
+    "flux_column": "pdcsap_flux",
+    "flux_description": "Pre-search Data Conditioning flux (systematics removed)",
+    "quality_bitmask": "default",
+    "quality_description": "Includes Rolling Band filtering (bit 17)",
+    "cadence": "long",
+    "cadence_minutes": 29.4,
+    "feature_count": 58,
+    "feature_domains": [
+      "statistical (12)",
+      "temporal (10)",
+      "frequency (10)",
+      "residual (8)",
+      "shape (8)",
+      "transit (7)",
+      "centroid (3)"
+    ],
+    "data_source": "NASA Exoplanet Archive (TAP)",
+    "mission": "Kepler",
+    "data_release": "DR25"
+  },
+  "runtime": {
+    "python_version": "3.12.3 (main, Jan  8 2026, 11:30:50) [GCC 13.3.0]",
+    "python_executable": "/mnt/c/Users/carol/xeno_scan/venv_linux/bin/python",
+    "platform": "linux",
+    "working_directory": "/mnt/c/Users/carol/xeno_scan/kepler-lightcurve-scraper"
+  },
+  "scientific_context": {
+    "purpose": "Kepler light curve feature extraction for exoplanet anomaly detection",
+    "baseline_type": "Quiet stars (no known planets, low CDPP)",
+    "validation_type": "Known planet hosts + quiet stars comparison",
+    "reference_standard": "Kepler Data Release 25 (DR25)"
+  },
+  "data_quality": {
+    "flux_type": "PDCSAP (Pre-search Data Conditioning)",
+    "flux_rationale": "Removes telescope systematics (thermal drift, focus changes)",
+    "quality_filtering": "Rolling Band (bit 17) + standard Kepler quality flags",
+    "quality_rationale": "Prevents electronic noise artifacts from contaminating features"
+  },
+  "additional": {
+    "test_target": "KIC 8462852",
+    "test_purpose": "Verify Priority 1 fixes"
+  }
+}

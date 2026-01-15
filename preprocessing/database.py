@@ -61,6 +61,14 @@ class XenoscanDatabase:
         mission: str,
         n_points: int = None,
         duration_days: float = None,
+        st_cdpp3_0: float = None,
+        st_cdpp6_0: float = None,
+        st_cdpp12_0: float = None,
+        st_crowding: float = None,
+        st_teff: float = None,
+        st_rad: float = None,
+        st_mass: float = None,
+        koi_count: int = None,
     ) -> bool:
         """
         Insert or update target metadata.
@@ -70,6 +78,14 @@ class XenoscanDatabase:
             mission: Mission name
             n_points: Number of data points
             duration_days: Observation duration
+            st_cdpp3_0: CDPP at 3-hour timescale (ppm)
+            st_cdpp6_0: CDPP at 6-hour timescale (ppm)
+            st_cdpp12_0: CDPP at 12-hour timescale (ppm)
+            st_crowding: Crowding metric (0-1)
+            st_teff: Effective temperature (K)
+            st_rad: Stellar radius (Rsun)
+            st_mass: Stellar mass (Msun)
+            koi_count: Number of planet candidates
 
         Returns:
             True if successful
@@ -82,6 +98,24 @@ class XenoscanDatabase:
                 'duration_days': duration_days,
                 'features_extracted': False,
             }
+
+            # Add optional metadata if provided
+            if st_cdpp3_0 is not None:
+                data['st_cdpp3_0'] = st_cdpp3_0
+            if st_cdpp6_0 is not None:
+                data['st_cdpp6_0'] = st_cdpp6_0
+            if st_cdpp12_0 is not None:
+                data['st_cdpp12_0'] = st_cdpp12_0
+            if st_crowding is not None:
+                data['st_crowding'] = st_crowding
+            if st_teff is not None:
+                data['st_teff'] = st_teff
+            if st_rad is not None:
+                data['st_rad'] = st_rad
+            if st_mass is not None:
+                data['st_mass'] = st_mass
+            if koi_count is not None:
+                data['koi_count'] = koi_count
 
             # Upsert (insert or update if exists)
             response = self.client.table('targets').upsert(
@@ -108,7 +142,7 @@ class XenoscanDatabase:
 
         Args:
             target_id: Target identifier
-            features: Dict of 47 features
+            features: Dict of 55 features
             validity: Dict of validity flags
             extraction_time: Time taken to extract (seconds)
 
@@ -122,7 +156,7 @@ class XenoscanDatabase:
                 'extraction_time_seconds': extraction_time,
                 'n_features_valid': sum(validity.values()),
                 'n_features_total': len(validity),
-                **features  # All 47 features
+                **features  # All 55 features
             }
 
             # Insert
