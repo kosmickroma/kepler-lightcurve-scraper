@@ -14,6 +14,7 @@ Target: Bulletproof reliability (99%+ success rate), 0.5-2 targets/sec sustainab
 
 import asyncio
 import logging
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +33,57 @@ import astropy.io.fits as fitsio
 fitsio.Conf.use_memmap = False
 
 logger = logging.getLogger(__name__)
+
+
+def _clear_target_cache(target_id: str) -> bool:
+    """
+    Delete cached FITS files for a specific target.
+
+    This prevents the "corrupt cache deadlock" where a partially-downloaded
+    file causes infinite retry loops. Called before retry attempts.
+
+    Args:
+        target_id: Target identifier (e.g., "KIC 7510397" or "Kepler-10")
+
+    Returns:
+        True if any cache files were deleted, False otherwise
+    """
+    cache_base = Path.home() / ".lightkurve" / "cache" / "mastDownload" / "Kepler"
+    if not cache_base.exists():
+        return False
+
+    deleted_any = False
+
+    # Handle KIC targets: "KIC 7510397" -> cache dirs like "kplr007510397_lc_Q01_llc"
+    if "KIC" in target_id.upper():
+        kic_num = target_id.upper().replace("KIC ", "").replace("KIC", "").strip()
+        pattern = f"kplr{kic_num.zfill(9)}*"
+    # Handle Kepler planet names: "Kepler-10" -> need to find by name
+    elif "Kepler-" in target_id or "kepler-" in target_id.lower():
+        # For named planets, clear any matching directory
+        # These are less common, but we handle them
+        pattern = f"*{target_id.replace(' ', '_').replace('-', '*')}*"
+    else:
+        # Generic fallback
+        pattern = f"*{target_id.replace(' ', '_')}*"
+
+    for cache_dir in cache_base.glob(pattern):
+        if cache_dir.is_dir():
+            try:
+                shutil.rmtree(cache_dir)
+                logger.info(f"Cleared corrupt cache: {cache_dir.name}")
+                deleted_any = True
+            except Exception as e:
+                logger.warning(f"Failed to clear cache dir {cache_dir}: {e}")
+        elif cache_dir.is_file():
+            try:
+                cache_dir.unlink()
+                logger.info(f"Cleared corrupt cache file: {cache_dir.name}")
+                deleted_any = True
+            except Exception as e:
+                logger.warning(f"Failed to clear cache file {cache_dir}: {e}")
+
+    return deleted_any
 
 
 @dataclass
@@ -152,6 +204,15 @@ class AsyncDownloader:
         """
         async with self.semaphore:
             for attempt in range(1, self.retry_attempts + 1):
+                # CRITICAL: Clear corrupt cache before retry attempts
+                # This prevents the "corrupt cache deadlock" where a partially-downloaded
+                # file causes the same failure on every retry
+                if attempt > 1:
+                    loop = asyncio.get_event_loop()
+                    cleared = await loop.run_in_executor(None, _clear_target_cache, target_id)
+                    if cleared:
+                        logger.info(f"{target_id}: Cleared corrupt cache before attempt {attempt}")
+
                 try:
                     download_start = time.time()
 
@@ -273,29 +334,13 @@ class AsyncDownloader:
             )
 
         except Exception as e:
-            # Cache corruption handling
-            if "truncated" in str(e).lower() or "corrupt" in str(e).lower():
-                logger.warning(f"Corrupted cache detected for {target_id}, retrying...")
-                # Retry with cache disabled (but keep PDCSAP and quality filtering)
-                quarter_lcs = []
-                for res in search:
-                    try:
-                        lc_quarter = res.download(
-                            download_dir=None,
-                            flux_column='pdcsap_flux',
-                            quality_bitmask='default'
-                        )
-                        quarter_lcs.append(lc_quarter)
-                    except:
-                        continue
-
-                if quarter_lcs:
-                    lc_collection = LightCurveCollection(quarter_lcs)
-                    lc = lc_collection.stitch()
-                else:
-                    raise
-            else:
-                raise
+            # Let cache corruption errors bubble up to the retry loop,
+            # which will clear the corrupt cache before the next attempt.
+            # This is cleaner than trying to handle it here.
+            error_str = str(e).lower()
+            if "truncated" in error_str or "corrupt" in error_str or "closed file" in error_str:
+                logger.warning(f"{target_id}: Cache corruption detected, will retry with fresh cache")
+            raise
 
         # Save to FITS
         filename = f"{target_id.replace(' ', '_').replace('/', '_')}.fits"

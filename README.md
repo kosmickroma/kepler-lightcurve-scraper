@@ -26,8 +26,9 @@ This document serves as both technical documentation and a living scientific rec
 6. [The Skeptic's Questions (And Our Answers)](#6-the-skeptics-questions-and-our-answers)
 7. [What We Expect to See in Validation](#7-what-we-expect-to-see-in-validation)
 8. [Running the Pipeline](#8-running-the-pipeline)
-9. [Project Status and Next Steps](#9-project-status-and-next-steps)
-10. [References](#10-references)
+9. [Hybrid Pipeline Architecture](#9-hybrid-pipeline-architecture)
+10. [Project Status and Next Steps](#10-project-status-and-next-steps)
+11. [References](#11-references)
 
 ---
 
@@ -490,8 +491,14 @@ python scripts/fetch_planet_hosts.py     # 100 confirmed planet hosts
 
 ### 8.4 Run Validation
 
+**Option A: Local Processing (Recommended for bulk data)**
 ```bash
-python scripts/test_validation_1000.py   # ~10-15 hours
+python scripts/run_validation_local.py   # ~2-4 hours, no API rate limits
+```
+
+**Option B: API Processing (For small batches or fresh data)**
+```bash
+python scripts/test_validation_1000.py   # ~10-15 hours, uses lightkurve API
 ```
 
 ### 8.5 Save Provenance
@@ -502,13 +509,116 @@ python scripts/save_provenance.py --run-type validation --n-targets 1000
 
 ---
 
-## 9. Project Status and Next Steps
+## 9. Hybrid Pipeline Architecture
 
-### Current Status (2026-01-15)
+### Why Two Processing Modes?
+
+XENOSCAN uses a **hybrid architecture** that supports both bulk historical data and streaming new data. This design choice emerged from practical experience: API-based downloads work well for small batches but hit rate limits when processing the full Kepler catalog (~160,000 targets).
+
+### The Two Modes
+
+| Mode | Use Case | Method | Speed |
+|------|----------|--------|-------|
+| **Local** | Bulk historical data (Kepler, K2) | Direct HTTP file downloads | ~4-8 files/sec |
+| **API** | Fresh data (Pandora 2026, new discoveries) | lightkurve search & download | ~0.02 targets/sec |
+
+### Mode A: Local Processing (Bulk Data)
+
+For processing the full Kepler catalog or any large historical dataset:
+
+```bash
+# Step 1: Generate direct download URLs from target list
+python scripts/generate_download_urls.py data/my_targets.txt
+
+# Step 2: Download FITS files (parallel, no API limits)
+python scripts/bulk_downloader.py data/my_targets_urls.txt data/fits_cache/ 4
+
+# Step 3: Process locally and upload to database
+python scripts/local_processor.py data/fits_cache/ --upload --delete
+```
+
+**How it works:**
+- Converts KIC IDs to direct MAST file URLs (no API calls)
+- Downloads files via HTTP with parallel workers
+- Processes FITS files locally with `lightkurve.read()`
+- Uploads features to Supabase
+- Deletes FITS files after processing to save disk space
+
+**Advantages:**
+- No API rate limiting
+- Parallelizable (4-8 workers safe)
+- Resumable (skips already-downloaded files)
+- Works on any computer with ~20GB free disk space
+
+### Mode B: API Processing (Fresh Data)
+
+For processing new observations or small targeted batches:
+
+```bash
+python scripts/test_validation_1000.py
+```
+
+**How it works:**
+- Uses lightkurve's `search_lightcurve().download()` API
+- Downloads data through MAST API
+- Includes automatic caching and retry logic
+
+**When to use:**
+- Pandora mission data (launching Feb 2026)
+- New Kepler/TESS discoveries
+- Small targeted studies (<100 targets)
+- Data not yet available in bulk archives
+
+### Processing the Full Kepler Catalog
+
+The full catalog (~160,000 targets, ~1.1TB) can be processed on **any computer** using the chunk-and-delete approach:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  CHUNK & DELETE APPROACH                    │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│   Batch 1: Targets 1-2000                                   │
+│   ├── Download FITS files (~30-40GB)                        │
+│   ├── Extract features → Supabase                           │
+│   └── DELETE raw files (back to 0GB)                        │
+│                                                             │
+│   Batch 2: Targets 2001-4000                                │
+│   ├── Download FITS files (~30-40GB)                        │
+│   ├── Extract features → Supabase                           │
+│   └── DELETE raw files (back to 0GB)                        │
+│                                                             │
+│   ... repeat until all 160,000 processed ...                │
+│                                                             │
+│   Result: Full catalog in Supabase, 0GB raw data on disk    │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Resource requirements:**
+- **Minimum:** 20GB free disk, 4GB RAM, any CPU → works, just slower
+- **Recommended:** 50GB free disk, 8GB RAM, 4+ cores → faster processing
+- **Time:** 2-4 weeks for full catalog (can run overnight, pause, resume)
+
+### Why This Matters for Pandora (2026)
+
+The Pandora mission launches in February 2026 and will provide new exoplanet atmospheric data. By maintaining both processing modes:
+
+1. **Kepler catalog** → Process now with Local mode (bulk historical data)
+2. **Pandora data** → Process as it arrives with API mode (streaming new data)
+3. **Same features, same database** → Unified dataset for ML training
+
+The hybrid architecture ensures XENOSCAN is ready for any data source, past or future.
+
+---
+
+## 10. Project Status and Next Steps
+
+### Current Status (2026-01-16)
 
 | Milestone | Status |
 |-----------|--------|
-| Core pipeline (62 features) | COMPLETE |
+| Core pipeline (63 features) | COMPLETE |
 | PDCSAP flux implementation | COMPLETE |
 | Rolling Band filtering | COMPLETE |
 | M-Dwarf representation (20%) | COMPLETE |
@@ -516,20 +626,30 @@ python scripts/save_provenance.py --run-type validation --n-targets 1000
 | Odd-even transit consistency | COMPLETE |
 | Instrumental alias detection | COMPLETE |
 | Provenance tracking | COMPLETE |
+| Hybrid pipeline architecture | COMPLETE |
+| Local processing mode | COMPLETE |
+| API processing mode (with cache fix) | COMPLETE |
 | 1000-target validation | IN PROGRESS |
+
+### Validation Progress
+
+- **107 targets** successfully processed and validated with Isolation Forest
+- **Anomaly detection working** — Salted planet hosts correctly identified as outliers
+- **Feature discrimination confirmed** — Quiet stars cluster, anomalies separate
+- **Local validation running** — 900 quiet + 100 anomalies via direct download
 
 ### Next Steps
 
-1. **Complete validation run** — Verify features discriminate populations
+1. **Complete local validation** — Verify 1000 targets process successfully
 2. **Statistical analysis** — Compare feature distributions, calculate effect sizes
-3. **Anomaly detection** — Find quiet stars with planet-like features (potential discoveries)
-4. **Scale to full catalog** — Process all ~199,000 Kepler targets
-5. **Machine learning** — Train classifiers on validated feature set
+3. **Scale to full catalog** — Process all ~160,000 Kepler targets (chunk & delete)
+4. **Machine learning** — Train classifiers on validated feature set
+5. **Pandora preparation** — Ready API mode for Feb 2026 mission data
 6. **Publication** — Document methodology and any discoveries
 
 ---
 
-## 10. References
+## 11. References
 
 1. **Jenkins, J. M., et al. (2010).** "Overview of the Kepler Science Processing Pipeline." *ApJ Letters*, 713, L87. — The original Kepler pipeline paper.
 
@@ -572,4 +692,4 @@ We thank the Lightkurve, Astropy, and NASA Exoplanet Archive teams for their exc
 
 ---
 
-*Last updated: 2026-01-15 — Validation run in progress*
+*Last updated: 2026-01-16 — Hybrid pipeline architecture complete, local validation in progress*
