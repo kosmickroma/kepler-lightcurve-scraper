@@ -135,7 +135,7 @@ async def main():
         return 1
 
     # ================================================================
-    # STEP 3: Process Locally and Upload
+    # STEP 3: Process Locally and Upload (with Ground Truth Labels)
     # ================================================================
     logger.info("")
     logger.info("=" * 60)
@@ -161,28 +161,77 @@ async def main():
         delete_after_processing=True,  # Clean up to save disk space
     )
 
+    # Load quiet star and planet host lists for ground truth labeling
+    with open(quiet_file, 'r') as f:
+        quiet_star_ids = set()
+        for line in f:
+            line = line.strip()
+            if line:
+                # Extract numeric part for matching
+                num = line.replace('KIC ', '').lstrip('0') or '0'
+                quiet_star_ids.add(num)
+
+    with open(planet_file, 'r') as f:
+        planet_host_ids = set(line.strip() for line in f if line.strip())
+
+    logger.info(f"Ground truth: {len(quiet_star_ids)} quiet stars, {len(planet_host_ids)} planet hosts")
+
     # Find all downloaded targets
-    targets = processor.get_available_targets()
-    logger.info(f"Found {len(targets)} targets to process")
+    all_targets = processor.get_available_targets()
+    logger.info(f"Found {len(all_targets)} targets to process")
 
-    # Process in batches
-    batch_size = 50
+    # Separate targets by ground truth label
+    quiet_targets = []
+    planet_targets = []
+    unknown_targets = []
+
+    for target in all_targets:
+        # Check if it's a quiet star (by numeric ID)
+        if target.lstrip('0') in quiet_star_ids or target in quiet_star_ids:
+            quiet_targets.append(target)
+        # Check if it's a planet host (by name like "Kepler-10")
+        elif target in planet_host_ids or f"Kepler-{target}" in planet_host_ids:
+            planet_targets.append(target)
+        else:
+            unknown_targets.append(target)
+
+    logger.info(f"Classified: {len(quiet_targets)} quiet, {len(planet_targets)} planets, {len(unknown_targets)} unknown")
+
+    # Process quiet stars (is_anomaly=False)
     all_results = []
+    batch_size = 50
 
-    for i in range(0, len(targets), batch_size):
-        batch = targets[i:i + batch_size]
-        batch_num = i // batch_size + 1
-        total_batches = (len(targets) + batch_size - 1) // batch_size
+    if quiet_targets:
+        logger.info("")
+        logger.info(f"Processing {len(quiet_targets)} QUIET STARS (is_anomaly=FALSE)...")
+        for i in range(0, len(quiet_targets), batch_size):
+            batch = quiet_targets[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            total_batches = (len(quiet_targets) + batch_size - 1) // batch_size
+            logger.info(f"  Quiet batch {batch_num}/{total_batches}...")
+            results = await processor.process_batch(batch, is_anomaly=False)
+            all_results.extend(results)
 
-        logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} targets)...")
+    # Process planet hosts (is_anomaly=True)
+    if planet_targets:
+        logger.info("")
+        logger.info(f"Processing {len(planet_targets)} PLANET HOSTS (is_anomaly=TRUE)...")
+        for i in range(0, len(planet_targets), batch_size):
+            batch = planet_targets[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            total_batches = (len(planet_targets) + batch_size - 1) // batch_size
+            logger.info(f"  Planet batch {batch_num}/{total_batches}...")
+            results = await processor.process_batch(batch, is_anomaly=True)
+            all_results.extend(results)
 
-        results = await processor.process_batch(batch)
-        all_results.extend(results)
-
-        # Progress update
-        n_done = len(all_results)
-        n_success = sum(1 for r in all_results if r.get('success', False))
-        logger.info(f"  Progress: {n_success}/{n_done} successful ({100*n_success/n_done:.1f}%)")
+    # Process unknown targets (default to is_anomaly=None/False)
+    if unknown_targets:
+        logger.info("")
+        logger.info(f"Processing {len(unknown_targets)} UNKNOWN targets (is_anomaly=FALSE)...")
+        for i in range(0, len(unknown_targets), batch_size):
+            batch = unknown_targets[i:i + batch_size]
+            results = await processor.process_batch(batch, is_anomaly=False)
+            all_results.extend(results)
 
     processor.shutdown()
 
@@ -202,6 +251,14 @@ async def main():
     logger.info(f"Failed: {n_failed}")
     logger.info("")
 
+    # Ground truth breakdown
+    logger.info("GROUND TRUTH SUMMARY:")
+    logger.info(f"  Quiet stars (is_anomaly=FALSE): {len(quiet_targets)} processed")
+    logger.info(f"  Planet hosts (is_anomaly=TRUE):  {len(planet_targets)} processed")
+    if unknown_targets:
+        logger.info(f"  Unknown (defaulted to FALSE):   {len(unknown_targets)} processed")
+    logger.info("")
+
     # Check disk cleanup
     remaining_files = list(fits_cache.rglob("*.fits"))
     if remaining_files:
@@ -212,12 +269,20 @@ async def main():
 
     logger.info("")
     logger.info("Features are now in Supabase. Run queries to validate:")
-    logger.info("  SELECT COUNT(*) FROM features;")
-    logger.info("  SELECT target_id, stat_mean, stat_std FROM features LIMIT 10;")
+    logger.info("  -- Count by ground truth label:")
+    logger.info("  SELECT is_anomaly, COUNT(*) FROM targets GROUP BY is_anomaly;")
+    logger.info("")
+    logger.info("  -- Validate Isolation Forest can distinguish:")
+    logger.info("  SELECT t.is_anomaly, AVG(f.stat_std), AVG(f.stat_skewness)")
+    logger.info("  FROM targets t JOIN features f ON t.target_id = f.target_id")
+    logger.info("  GROUP BY t.is_anomaly;")
 
-    if n_success >= 900:  # 90% success
+    if n_success >= len(all_results) * 0.9:  # 90% success
         logger.info("")
         logger.info("VALIDATION PASSED!")
+        logger.info("")
+        logger.info("Next step: Train Isolation Forest and check if planet hosts")
+        logger.info("are correctly flagged as anomalies!")
         return 0
     else:
         logger.warning("")

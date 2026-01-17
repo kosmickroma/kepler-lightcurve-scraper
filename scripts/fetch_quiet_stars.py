@@ -113,7 +113,8 @@ def fetch_quiet_stars(n_stars=900, mdwarf_fraction=0.20, output_file="data/quiet
     """
 
     df_sunlike = fetch_stars_by_type(query_sunlike, "Sun-like stars (Teff 4000-7000K)")
-    print(f"  Found {len(df_sunlike)} sun-like stars")
+    df_sunlike = df_sunlike.drop_duplicates(subset='kepid', keep='first')
+    print(f"  Found {len(df_sunlike)} unique sun-like stars")
 
     # Query 2: M-Dwarfs (Teff < 4000K)
     # Note: M-Dwarfs are smaller (typical radius 0.1-0.6 Rsun)
@@ -140,7 +141,8 @@ def fetch_quiet_stars(n_stars=900, mdwarf_fraction=0.20, output_file="data/quiet
     """
 
     df_mdwarfs = fetch_stars_by_type(query_mdwarfs, "M-Dwarf stars (Teff < 4000K)")
-    print(f"  Found {len(df_mdwarfs)} M-Dwarf stars")
+    df_mdwarfs = df_mdwarfs.drop_duplicates(subset='kepid', keep='first')
+    print(f"  Found {len(df_mdwarfs)} unique M-Dwarf stars")
     print()
 
     # Check if we have enough M-Dwarfs
@@ -182,8 +184,15 @@ def fetch_quiet_stars(n_stars=900, mdwarf_fraction=0.20, output_file="data/quiet
             print(f"  CDPP (3hr) range: {subset['rrmscdpp03p0'].min():.1f} - {subset['rrmscdpp03p0'].max():.1f} ppm")
             print()
 
-    # Format as "KIC {kepid}"
-    targets = [f"KIC {int(kepid)}" for kepid in df_combined['kepid']]
+    # Deduplicate by kepid before formatting (NASA archive sometimes has duplicate entries)
+    df_combined = df_combined.drop_duplicates(subset='kepid', keep='first')
+    print(f"After deduplication: {len(df_combined)} unique stars")
+
+    # Format as "KIC {kepid}" with 9-digit zero-padding for consistency
+    targets = [f"KIC {str(int(kepid)).zfill(9)}" for kepid in df_combined['kepid']]
+
+    # Extra safety: deduplicate the final list
+    targets = list(dict.fromkeys(targets))  # Preserves order, removes duplicates
 
     # Write target IDs to file
     output_path = Path(output_file)
@@ -192,7 +201,7 @@ def fetch_quiet_stars(n_stars=900, mdwarf_fraction=0.20, output_file="data/quiet
     with open(output_path, 'w') as f:
         f.write('\n'.join(targets))
 
-    print(f"Wrote {len(targets)} targets to {output_file}")
+    print(f"Wrote {len(targets)} unique targets to {output_file}")
 
     # Also save metadata CSV for later upload
     metadata_file = output_file.replace('.txt', '_metadata.csv')

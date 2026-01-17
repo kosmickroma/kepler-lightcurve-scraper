@@ -61,6 +61,8 @@ class XenoscanDatabase:
         mission: str,
         n_points: int = None,
         duration_days: float = None,
+        is_anomaly: bool = None,
+        flag_reason: str = None,
         st_cdpp3_0: float = None,
         st_cdpp6_0: float = None,
         st_cdpp12_0: float = None,
@@ -78,6 +80,8 @@ class XenoscanDatabase:
             mission: Mission name
             n_points: Number of data points
             duration_days: Observation duration
+            is_anomaly: Ground truth label (False=quiet star, True=known anomaly, None=unknown)
+            flag_reason: Reason for flagging (e.g., 'high_variability')
             st_cdpp3_0: CDPP at 3-hour timescale (ppm)
             st_cdpp6_0: CDPP at 6-hour timescale (ppm)
             st_cdpp12_0: CDPP at 12-hour timescale (ppm)
@@ -98,6 +102,12 @@ class XenoscanDatabase:
                 'duration_days': duration_days,
                 'features_extracted': False,
             }
+
+            # Add ground truth labels if provided
+            if is_anomaly is not None:
+                data['is_anomaly'] = is_anomaly
+            if flag_reason is not None:
+                data['flag_reason'] = flag_reason
 
             # Add optional metadata if provided
             if st_cdpp3_0 is not None:

@@ -223,13 +223,14 @@ class LocalProcessor:
 
         return sorted(kic_dirs)
 
-    async def process_target(self, kic_id: str, mission: str = 'Kepler') -> Dict[str, Any]:
+    async def process_target(self, kic_id: str, mission: str = 'Kepler', is_anomaly: bool = False) -> Dict[str, Any]:
         """
         Process a single target: extract features and upload to database.
 
         Args:
             kic_id: KIC identifier
             mission: Mission name
+            is_anomaly: Ground truth label (False=quiet star, True=known planet host)
 
         Returns:
             Result dict with success status and metadata
@@ -260,21 +261,30 @@ class LocalProcessor:
             # Upload to database
             if self.database_client is not None:
                 try:
+                    # Standardize target ID format
+                    # KIC IDs: pad to 9 digits (e.g., "KIC 007584294")
+                    # Kepler names: keep as-is (e.g., "Kepler-10")
+                    if str(kic_id).isdigit():
+                        canonical_id = f"KIC {str(kic_id).zfill(9)}"
+                    else:
+                        canonical_id = str(kic_id)  # Keep Kepler-X names as-is
+
                     await self.database_client.insert_target(
-                        target_id=f"KIC {kic_id}",
+                        target_id=canonical_id,
                         mission=mission,
                         n_points=features.get('temp_n_points', 0),
                         duration_days=features.get('temp_duration_days', 0),
+                        is_anomaly=is_anomaly,  # Ground truth label
                     )
 
                     await self.database_client.insert_features(
-                        target_id=f"KIC {kic_id}",
+                        target_id=canonical_id,
                         features=features,
                         validity=validity,
                         extraction_time=time.time() - start_time,
                     )
 
-                    logger.info(f"KIC {kic_id}: Uploaded to database")
+                    logger.info(f"{canonical_id}: Uploaded to database")
 
                 except Exception as e:
                     logger.error(f"KIC {kic_id}: Database upload failed: {e}")
@@ -312,7 +322,8 @@ class LocalProcessor:
     async def process_batch(
         self,
         kic_ids: List[str],
-        mission: str = 'Kepler'
+        mission: str = 'Kepler',
+        is_anomaly: bool = False
     ) -> List[Dict[str, Any]]:
         """
         Process multiple targets.
@@ -320,16 +331,18 @@ class LocalProcessor:
         Args:
             kic_ids: List of KIC identifiers
             mission: Mission name
+            is_anomaly: Ground truth label for all targets in batch
 
         Returns:
             List of result dicts
         """
         import asyncio
 
-        logger.info(f"Processing batch of {len(kic_ids)} targets")
+        label = "anomalies" if is_anomaly else "quiet stars"
+        logger.info(f"Processing batch of {len(kic_ids)} {label}")
 
         tasks = [
-            self.process_target(kic_id, mission)
+            self.process_target(kic_id, mission, is_anomaly=is_anomaly)
             for kic_id in kic_ids
         ]
 
