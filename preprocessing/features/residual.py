@@ -6,19 +6,33 @@ Tests for unexplained signal that survives baseline removal.
 
 REMEDIATION 2026-01-17: Added timeout to lempel_ziv_complexity to fix O(N³)
 performance issue causing 25+ min extraction times. Gemini-validated.
+
+OPTIMIZATION 2026-01-18: Switched to signal-based timeout (works inside ProcessPoolExecutor).
+ThreadPoolExecutor timeout doesn't work due to Python GIL in subprocesses.
 """
 
 import logging
+import signal
 import numpy as np
 from typing import Dict, Tuple
 from scipy import stats
 from statsmodels.stats.diagnostic import acorr_ljungbox
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 logger = logging.getLogger(__name__)
 
-# Timeout for expensive operations (Gemini-approved: 5 seconds)
-LEMPEL_ZIV_TIMEOUT_SEC = 5.0
+# Timeout for expensive operations
+# UPDATED 2026-01-18: 10 seconds per user request (was 5 seconds)
+LEMPEL_ZIV_TIMEOUT_SEC = 10
+
+
+class LempelZivTimeout(Exception):
+    """Raised when Lempel-Ziv computation exceeds time limit."""
+    pass
+
+
+def _lempel_ziv_timeout_handler(signum, frame):
+    """Signal handler for Lempel-Ziv timeout."""
+    raise LempelZivTimeout("Lempel-Ziv computation timed out")
 
 
 def _lempel_ziv_core(signal: np.ndarray, bins: int = 10) -> float:
@@ -74,36 +88,42 @@ def _lempel_ziv_core(signal: np.ndarray, bins: int = 10) -> float:
     return 0.0
 
 
-def lempel_ziv_complexity(signal: np.ndarray, bins: int = 10,
-                          timeout_sec: float = LEMPEL_ZIV_TIMEOUT_SEC) -> float:
+def lempel_ziv_complexity(input_signal: np.ndarray, bins: int = 10,
+                          timeout_sec: int = LEMPEL_ZIV_TIMEOUT_SEC) -> float:
     """
-    Compute Lempel-Ziv complexity with timeout protection.
+    Compute Lempel-Ziv complexity with signal-based timeout protection.
 
     REMEDIATION 2026-01-17: Added timeout to prevent O(N³) hangs.
-    Gemini-validated threshold: 5 seconds.
+    OPTIMIZATION 2026-01-18: Switched to signal.SIGALRM (works in ProcessPoolExecutor).
 
     Args:
-        signal: Input signal array
+        input_signal: Input signal array
         bins: Number of bins for discretization
-        timeout_sec: Maximum execution time (default 5 seconds)
+        timeout_sec: Maximum execution time (default 10 seconds)
 
     Returns:
         Normalized complexity score, or 0.0 if timeout/error
     """
-    if len(signal) < 10:
+    if len(input_signal) < 10:
         return 0.0
 
+    # Set up signal-based timeout (works in subprocess main thread)
+    old_handler = signal.signal(signal.SIGALRM, _lempel_ziv_timeout_handler)
+    signal.alarm(timeout_sec)
+
     try:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_lempel_ziv_core, signal, bins)
-            result = future.result(timeout=timeout_sec)
-            return result
-    except FuturesTimeoutError:
-        logger.warning(f"lempel_ziv_complexity timed out after {timeout_sec}s (n_points={len(signal)})")
-        return 0.0
+        result = _lempel_ziv_core(input_signal, bins)
+        signal.alarm(0)  # Cancel the alarm on success
+        return result
+    except LempelZivTimeout:
+        logger.warning(f"lempel_ziv_complexity timed out after {timeout_sec}s (n_points={len(input_signal)})")
+        return -1.0  # Special value indicating timeout (complexity is always >= 0)
     except Exception as e:
         logger.warning(f"lempel_ziv_complexity failed: {type(e).__name__}: {e}")
         return 0.0
+    finally:
+        signal.alarm(0)  # Always cancel alarm
+        signal.signal(signal.SIGALRM, old_handler)  # Restore original handler
 
 
 def extract_residual_features(
@@ -243,13 +263,24 @@ def extract_residual_features(
             validity['resid_ljung_box_pvalue'] = False
 
         # Lempel-Ziv complexity
+        # RE-ENABLED 2026-01-18: Now uses signal.SIGALRM timeout (works in ProcessPoolExecutor)
+        # 10-second timeout per user request - if it hangs, logs NULL and moves on
         try:
-            complexity = lempel_ziv_complexity(residuals, bins=10)
-            features['resid_complexity'] = float(complexity)
-            validity['resid_complexity'] = True
-        except Exception:
+            lz_result = lempel_ziv_complexity(residuals, bins=10, timeout_sec=LEMPEL_ZIV_TIMEOUT_SEC)
+            if lz_result < 0:
+                # Timeout - record as NULL and flag for processing_status
+                features['resid_complexity'] = None
+                validity['resid_complexity'] = False
+                features['_lz_timed_out'] = True  # Internal flag for processing_status
+            elif lz_result >= 0:
+                features['resid_complexity'] = float(lz_result)
+                validity['resid_complexity'] = True
+                features['_lz_timed_out'] = False
+        except Exception as e:
+            logger.warning(f"Lempel-Ziv failed: {e}")
             features['resid_complexity'] = None
             validity['resid_complexity'] = False
+            features['_lz_timed_out'] = False  # Not a timeout, just an error
 
     except Exception:
         # If any major error, mark all as invalid

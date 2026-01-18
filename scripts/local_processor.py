@@ -10,6 +10,7 @@ This is the fast path for bulk processing when files are already downloaded.
 
 import sys
 import os
+import gc
 from pathlib import Path
 import logging
 import time
@@ -118,6 +119,7 @@ def extract_features_from_local(
     """
     try:
         # Import inside function for multiprocessing
+        import gc
         import astropy.io.fits as fitsio
         fitsio.Conf.use_memmap = False
         import numpy as np
@@ -159,12 +161,31 @@ def extract_features_from_local(
         features['temp_n_points'] = len(flux)
         features['temp_duration_days'] = float(time[-1] - time[0]) if len(time) > 1 else 0
 
-        logger.info(f"KIC {kic_id}: Extracted {sum(validity.values())}/{len(validity)} valid features")
+        # Determine processing_status based on timeout flags
+        # (Gemini's "Flag and Fill" - timeouts are CLUES, not garbage)
+        bls_timed_out = features.pop('_bls_timed_out', False)  # Remove internal flag
+        lz_timed_out = features.pop('_lz_timed_out', False)  # Remove internal flag
+
+        if bls_timed_out and lz_timed_out:
+            features['processing_status'] = 'bls_lz_timeout'
+        elif bls_timed_out:
+            features['processing_status'] = 'bls_timeout'
+        elif lz_timed_out:
+            features['processing_status'] = 'lz_timeout'
+        else:
+            features['processing_status'] = 'success'
+
+        logger.info(f"KIC {kic_id}: Extracted {sum(validity.values())}/{len(validity)} valid features (status: {features['processing_status']})")
+
+        # Memory hygiene: prevent bloat over 900 stars
+        # (Gemini's Guardrail 3: "Flush the toilet after each star")
+        gc.collect()
 
         return (kic_id, features, validity)
 
     except Exception as e:
         logger.error(f"KIC {kic_id}: Feature extraction failed: {e}")
+        gc.collect()  # Clean up even on failure
         return (kic_id, None, None)
 
 
