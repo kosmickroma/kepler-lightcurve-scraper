@@ -1,8 +1,13 @@
 """
-Main Feature Extractor - Orchestrates all 6 feature domains
+Main Feature Extractor - Orchestrates all 7 feature domains
 
-Extracts all 47 features from a light curve FITS file.
+Extracts all 64 features from a light curve FITS file.
 Handles errors gracefully, tracks feature validity.
+
+REMEDIATION 2026-01-17: Updated for Gemini-validated fixes:
+- Transit features now include transit_significant flag (64 total features)
+- Centroid column case sensitivity fixed
+- Lempel-Ziv complexity has timeout protection
 """
 
 import logging
@@ -26,24 +31,26 @@ logger = logging.getLogger(__name__)
 
 class FeatureExtractor:
     """
-    Extract all 47 features from exoplanet light curves.
+    Extract all 64 features from exoplanet light curves.
 
-    Coordinates feature extraction across 6 signal domains:
+    Coordinates feature extraction across 7 signal domains:
     - Statistical (12 features)
     - Temporal (10 features)
-    - Frequency (10 features)
+    - Frequency (11 features)
     - Residual (8 features)
     - Shape (8 features)
-    - Transit (7 features)
+    - Transit (11 features) - includes transit_significant flag
+    - Centroid (4 features)
 
     Handles missing data gracefully with NULL values.
     """
 
     def __init__(self):
         """Initialize feature extractor."""
-        # Feature count: stat(12) + temp(10) + freq(11) + resid(8) + shape(8) + transit(10) + centroid(4) = 63
+        # Feature count: stat(12) + temp(10) + freq(11) + resid(8) + shape(8) + transit(11) + centroid(4) = 64
         # Note: Scientific validation features added:
-        #   Transit (3 new):
+        #   Transit (4 new - REMEDIATION 2026-01-17):
+        #     - transit_significant (NEW: prevents feature leakage, Gemini-validated)
         #     - transit_implied_r_planet_rjup (physical plausibility)
         #     - transit_physically_plausible (R_p < 2 R_Jupiter check)
         #     - transit_odd_even_consistent (eclipsing binary detection)
@@ -51,7 +58,7 @@ class FeatureExtractor:
         #     - freq_is_instrumental_alias (12h/24h alias detection)
         #   Centroid (4 total):
         #     - centroid_jitter_mean, centroid_jitter_std, centroid_jitter_max, centroid_rms_motion
-        self.feature_count = 63
+        self.feature_count = 64
         self.domain_extractors = {
             'statistical': extract_statistical_features,
             'temporal': extract_temporal_features,
@@ -65,12 +72,19 @@ class FeatureExtractor:
     def load_light_curve_from_fits(
         self,
         fits_path: Path,
+        sigma_clip_threshold: float = 5.0,
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Dict[str, any]]:
         """
-        Load light curve from FITS file.
+        Load light curve from FITS file with cosmic ray removal.
+
+        REMEDIATION 2026-01-17: Added 5σ sigma clipping for cosmic rays.
+        Gemini: "5σ is the Golden Rule for Kepler data processing."
+        - 3σ too aggressive (might clip Hot Jupiter transits)
+        - 10σ too loose (leaves in 1,553σ glitches)
 
         Args:
             fits_path: Path to FITS file
+            sigma_clip_threshold: Sigma threshold for outlier removal (default 5.0)
 
         Returns:
             Tuple of (flux, time, metadata)
@@ -92,10 +106,37 @@ class FeatureExtractor:
                 logger.warning(f"Zero median flux in {fits_path}")
                 return None, None, {}
 
+            # SIGMA CLIPPING FOR COSMIC RAYS (Gemini-validated: 5σ)
+            # Uses Median Absolute Deviation (MAD) for robust estimation
+            # MAD is resistant to outliers unlike standard deviation
+            n_before_clip = len(flux)
+            median_norm = np.median(flux)
+            mad = np.median(np.abs(flux - median_norm))
+            robust_std = 1.4826 * mad  # MAD to σ conversion factor
+
+            if robust_std > 0:
+                valid_mask = np.abs(flux - median_norm) < sigma_clip_threshold * robust_std
+                n_clipped = np.sum(~valid_mask)
+
+                if n_clipped > 0:
+                    clip_pct = 100 * n_clipped / n_before_clip
+                    logger.info(f"Sigma clipping: removed {n_clipped} cosmic ray points "
+                               f"({clip_pct:.2f}%) with {sigma_clip_threshold}σ threshold")
+
+                    # Only clip if we're not removing too much data (< 5%)
+                    if clip_pct < 5.0:
+                        flux = flux[valid_mask]
+                        time = time[valid_mask]
+                    else:
+                        logger.warning(f"Sigma clipping would remove {clip_pct:.1f}% of data - "
+                                      f"skipping to preserve data integrity")
+
             # Metadata
             metadata = {
                 'n_points_raw': len(lc.flux),
+                'n_points_after_nan': n_before_clip,
                 'n_points_clean': len(flux),
+                'n_cosmic_rays_clipped': n_before_clip - len(flux),
                 'mission': lc.meta.get('MISSION', 'unknown'),
                 'target_id': lc.meta.get('OBJECT', 'unknown'),
             }
@@ -277,9 +318,12 @@ class FeatureExtractor:
                 'shape_max_consecutive_down', 'shape_crossing_rate'
             ],
             'transit': [
+                # Core BLS features (ALWAYS populated - Gemini requirement)
                 'transit_bls_power', 'transit_bls_period', 'transit_bls_depth',
-                'transit_bls_duration', 'transit_n_detected',
-                'transit_depth_consistency', 'transit_timing_consistency',
+                'transit_bls_duration', 'transit_significant',  # NEW: prevents feature leakage
+                # Derived features (NULL if transit_significant=0)
+                'transit_n_detected', 'transit_depth_consistency', 'transit_timing_consistency',
+                # Physical validation features
                 'transit_implied_r_planet_rjup', 'transit_physically_plausible',
                 'transit_odd_even_consistent'
             ],

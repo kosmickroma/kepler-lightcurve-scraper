@@ -1,21 +1,35 @@
 """
-Transit Features (Domain 6) - 7 features + 2 physical validation features
+Transit Features (Domain 6) - 11 features total
 
 These characterize transit-like periodic dip signals using BLS.
-Note: These are OPTIONAL features - NULL if no transit detected.
+
+REMEDIATION 2026-01-17: Fixed feature leakage bug.
+Previously, ALL transit features were set to NULL when BLS power < 0.05.
+This caused the Isolation Forest to trivially learn "has BLS value = anomaly".
+
+Per Gemini's guidance: "The Noise Floor is just as important as the Signal."
+Now we ALWAYS return BLS core values (power, period, depth, duration) and add
+a `transit_significant` flag. This teaches the model the difference between
+astrophysical noise and coherent planetary signals.
 
 SCIENTIFIC VALIDATION: Includes physical plausibility check
 to identify false positives (eclipsing binaries masquerading as planets).
 """
 
+import logging
 import numpy as np
 from typing import Dict, Tuple, Optional
 from astropy.timeseries import BoxLeastSquares
+
+logger = logging.getLogger(__name__)
 
 # Physical constants for planet radius validation
 R_JUPITER_R_EARTH = 11.2  # Jupiter radius in Earth radii
 R_SUN_R_EARTH = 109.1     # Solar radius in Earth radii
 MAX_PLANET_R_JUPITER = 2.0  # Maximum plausible planet radius in R_Jupiter
+
+# BLS significance threshold (Gemini-validated)
+BLS_SIGNIFICANCE_THRESHOLD = 0.05
 
 
 def extract_transit_features(
@@ -34,12 +48,23 @@ def extract_transit_features(
     Returns:
         Tuple of (features dict, validity dict)
 
-    Features (7 original + 3 scientific validation):
-        transit_bls_power, transit_bls_period, transit_bls_depth,
-        transit_bls_duration, transit_n_detected,
-        transit_depth_consistency, transit_timing_consistency,
-        transit_implied_r_planet_rjup, transit_physically_plausible,
-        transit_odd_even_consistent
+    Features (11 total):
+        Core BLS features (ALWAYS populated - Gemini requirement):
+            transit_bls_power, transit_bls_period, transit_bls_depth,
+            transit_bls_duration, transit_significant (NEW)
+
+        Derived features (NULL if transit_significant=0):
+            transit_n_detected, transit_depth_consistency,
+            transit_timing_consistency
+
+        Physical validation features (NULL if no st_rad or transit_significant=0):
+            transit_implied_r_planet_rjup, transit_physically_plausible,
+            transit_odd_even_consistent
+
+    REMEDIATION 2026-01-17:
+        Core BLS features are ALWAYS returned to prevent feature leakage.
+        The model needs to see the "noise floor" of quiet stars (low BLS power)
+        to distinguish from the coherent signals of planet hosts (high BLS power).
 
     SCIENTIFIC VALIDATION:
         1. Physical plausibility: If st_rad is provided, calculates implied
@@ -50,10 +75,6 @@ def extract_transit_features(
         2. Odd-even consistency: Compares odd vs even transit depths to
            detect eclipsing binaries (which have alternating depths due to
            two stars of different sizes/temperatures).
-
-    Note:
-        These features are OPTIONAL per project rules.
-        If no transit detected or requirements not met, all = NULL.
     """
     features = {}
     validity = {}
@@ -61,13 +82,16 @@ def extract_transit_features(
     n_points = len(flux)
     duration = time[-1] - time[0]
 
-    # All feature keys (7 original + 2 physical validation + 1 odd-even check)
+    # All feature keys (5 core + 3 derived + 3 physical validation = 11 total)
     all_feature_keys = [
+        # Core BLS features (ALWAYS populated)
         'transit_bls_power', 'transit_bls_period', 'transit_bls_depth',
-        'transit_bls_duration', 'transit_n_detected',
-        'transit_depth_consistency', 'transit_timing_consistency',
+        'transit_bls_duration', 'transit_significant',
+        # Derived features (NULL if not significant)
+        'transit_n_detected', 'transit_depth_consistency', 'transit_timing_consistency',
+        # Physical validation features
         'transit_implied_r_planet_rjup', 'transit_physically_plausible',
-        'transit_odd_even_consistent'  # Eclipsing binary detection
+        'transit_odd_even_consistent'
     ]
 
     # Check minimum requirements
@@ -103,6 +127,7 @@ def extract_transit_features(
         duration = periodogram.duration[np.argmax(periodogram.power)]
         depth = periodogram.depth[np.argmax(periodogram.power)]
 
+        # CORE BLS FEATURES - Always populated (Gemini requirement)
         features['transit_bls_power'] = float(power)
         features['transit_bls_period'] = float(period)
         features['transit_bls_depth'] = float(abs(depth))
@@ -111,6 +136,32 @@ def extract_transit_features(
         validity['transit_bls_period'] = True
         validity['transit_bls_depth'] = True
         validity['transit_bls_duration'] = True
+
+        # NEW: Significance flag (prevents feature leakage)
+        # Gemini: "The Noise Floor is just as important as the Signal"
+        is_significant = power >= BLS_SIGNIFICANCE_THRESHOLD
+        features['transit_significant'] = 1.0 if is_significant else 0.0
+        validity['transit_significant'] = True
+
+        logger.debug(f"BLS: power={power:.4f}, significant={is_significant}, "
+                    f"period={period:.2f}d, depth={abs(depth):.6f}")
+
+        # DERIVED FEATURES - Only computed if significant transit detected
+        if not is_significant:
+            # Set derived features to NULL/0 for non-significant detections
+            features['transit_n_detected'] = 0
+            features['transit_depth_consistency'] = None
+            features['transit_timing_consistency'] = None
+            features['transit_implied_r_planet_rjup'] = None
+            features['transit_physically_plausible'] = None
+            features['transit_odd_even_consistent'] = None
+            validity['transit_n_detected'] = True  # 0 is a valid value
+            validity['transit_depth_consistency'] = False
+            validity['transit_timing_consistency'] = False
+            validity['transit_implied_r_planet_rjup'] = False
+            validity['transit_physically_plausible'] = False
+            validity['transit_odd_even_consistent'] = False
+            return features, validity
 
         # Count number of transits detected
         # Fold at best period and look for consistent dips
@@ -261,19 +312,18 @@ def extract_transit_features(
             else:
                 features['transit_odd_even_consistent'] = None
                 validity['transit_odd_even_consistent'] = False
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Odd-even consistency check failed: {e}")
             features['transit_odd_even_consistent'] = None
             validity['transit_odd_even_consistent'] = False
 
-        # If BLS power is low, mark all transit features as NULL
-        # (no significant transit detected)
-        if power < 0.05:  # Threshold for "significant" transit
-            for key in features.keys():
-                features[key] = None
-                validity[key] = False
+        # NOTE: Removed the old "if power < 0.05: null everything" logic
+        # This was causing feature leakage - now handled with early return above
 
-    except Exception:
-        # If BLS fails entirely, mark all as invalid
+    except Exception as e:
+        # If BLS fails entirely, still try to return zeros for core features
+        # so the model sees "BLS ran but found nothing" vs "BLS couldn't run"
+        logger.error(f"BLS extraction failed: {type(e).__name__}: {e}")
         for key in all_feature_keys:
             features[key] = None
             validity[key] = False

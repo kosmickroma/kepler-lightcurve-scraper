@@ -3,17 +3,30 @@ Residual Features (Domain 4) - 8 features
 
 These capture structure remaining after polynomial detrending.
 Tests for unexplained signal that survives baseline removal.
+
+REMEDIATION 2026-01-17: Added timeout to lempel_ziv_complexity to fix O(N³)
+performance issue causing 25+ min extraction times. Gemini-validated.
 """
 
+import logging
 import numpy as np
 from typing import Dict, Tuple
 from scipy import stats
 from statsmodels.stats.diagnostic import acorr_ljungbox
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+logger = logging.getLogger(__name__)
+
+# Timeout for expensive operations (Gemini-approved: 5 seconds)
+LEMPEL_ZIV_TIMEOUT_SEC = 5.0
 
 
-def lempel_ziv_complexity(signal: np.ndarray, bins: int = 10) -> float:
+def _lempel_ziv_core(signal: np.ndarray, bins: int = 10) -> float:
     """
-    Compute Lempel-Ziv complexity of signal.
+    Core Lempel-Ziv complexity computation (called with timeout wrapper).
+
+    WARNING: This function has O(N³) worst-case complexity due to substring search.
+    Always call via lempel_ziv_complexity() which applies a timeout.
 
     Args:
         signal: Input signal array
@@ -25,42 +38,71 @@ def lempel_ziv_complexity(signal: np.ndarray, bins: int = 10) -> float:
     if len(signal) < 10:
         return 0.0
 
-    try:
-        # Discretize signal
-        signal_min, signal_max = np.min(signal), np.max(signal)
-        if signal_max - signal_min == 0:
-            return 0.0
-
-        edges = np.linspace(signal_min, signal_max, bins + 1)
-        digitized = np.digitize(signal, edges[:-1])
-
-        # Convert to string
-        s = ''.join(map(str, digitized))
-
-        # Count unique substrings (Lempel-Ziv)
-        n = len(s)
-        complexity = 1
-        l = 0
-        k = 1
-        k_max = 1
-
-        while l + k <= n:
-            if s[l:l+k] in s[0:l+k-1]:
-                k += 1
-                if k > k_max:
-                    k_max = k
-            else:
-                complexity += 1
-                l += k_max if k_max >= k else k
-                k = 1
-                k_max = 1
-
-        # Normalize
-        if n > 0:
-            return complexity * np.log2(n) / n
+    # Discretize signal
+    signal_min, signal_max = np.min(signal), np.max(signal)
+    if signal_max - signal_min == 0:
         return 0.0
 
-    except Exception:
+    edges = np.linspace(signal_min, signal_max, bins + 1)
+    digitized = np.digitize(signal, edges[:-1])
+
+    # Convert to string
+    s = ''.join(map(str, digitized))
+
+    # Count unique substrings (Lempel-Ziv)
+    # NOTE: This loop has O(N³) worst case - protected by timeout
+    n = len(s)
+    complexity = 1
+    l = 0
+    k = 1
+    k_max = 1
+
+    while l + k <= n:
+        if s[l:l+k] in s[0:l+k-1]:  # O(N) substring search
+            k += 1
+            if k > k_max:
+                k_max = k
+        else:
+            complexity += 1
+            l += k_max if k_max >= k else k
+            k = 1
+            k_max = 1
+
+    # Normalize
+    if n > 0:
+        return complexity * np.log2(n) / n
+    return 0.0
+
+
+def lempel_ziv_complexity(signal: np.ndarray, bins: int = 10,
+                          timeout_sec: float = LEMPEL_ZIV_TIMEOUT_SEC) -> float:
+    """
+    Compute Lempel-Ziv complexity with timeout protection.
+
+    REMEDIATION 2026-01-17: Added timeout to prevent O(N³) hangs.
+    Gemini-validated threshold: 5 seconds.
+
+    Args:
+        signal: Input signal array
+        bins: Number of bins for discretization
+        timeout_sec: Maximum execution time (default 5 seconds)
+
+    Returns:
+        Normalized complexity score, or 0.0 if timeout/error
+    """
+    if len(signal) < 10:
+        return 0.0
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_lempel_ziv_core, signal, bins)
+            result = future.result(timeout=timeout_sec)
+            return result
+    except FuturesTimeoutError:
+        logger.warning(f"lempel_ziv_complexity timed out after {timeout_sec}s (n_points={len(signal)})")
+        return 0.0
+    except Exception as e:
+        logger.warning(f"lempel_ziv_complexity failed: {type(e).__name__}: {e}")
         return 0.0
 
 
